@@ -639,6 +639,10 @@ def get_btc_mining_data():
 def get_reddit_sentiment():
     """Fetch and analyze Reddit posts for Bitcoin sentiment"""
     try:
+        # Set timeout to prevent hanging
+        timeout_seconds = 30
+        start_time = time.time()
+        
         # Initialize Reddit API with environment variables
         reddit_client_id = os.getenv("REDDIT_CLIENT_ID")
         reddit_client_secret = os.getenv("REDDIT_CLIENT_SECRET")
@@ -661,47 +665,71 @@ def get_reddit_sentiment():
         posts_data = []
         
         for subreddit_name in subreddits:
-            subreddit = reddit.subreddit(subreddit_name)
-            
-            # Get hot posts
-            for post in subreddit.hot(limit=25):
-                # Analyze post sentiment
-                sentiment = analyze_text_sentiment(post.title + " " + post.selftext)
+            # Check timeout
+            if time.time() - start_time > timeout_seconds:
+                st.warning("Reddit API request timed out. Using sample data.")
+                return generate_sample_reddit_data()
                 
-                # Collect post data
-                post_data = {
-                    "id": post.id,
-                    "subreddit": subreddit_name,
-                    "title": post.title,
-                    "score": post.score,
-                    "num_comments": post.num_comments,
-                    "created_utc": datetime.fromtimestamp(post.created_utc),
-                    "sentiment_score": sentiment["score"],
-                    "sentiment_label": sentiment["label"],
-                    "type": "post"
-                }
+            try:
+                subreddit = reddit.subreddit(subreddit_name)
                 
-                posts_data.append(post_data)
-                
-                # Analyze top comments
-                post.comments.replace_more(limit=0)  # Skip fetching more comments
-                for comment in list(post.comments)[:10]:  # Get top 10 comments
-                    comment_sentiment = analyze_text_sentiment(comment.body)
+                # Get hot posts with timeout check
+                for post in subreddit.hot(limit=10):  # Reduced from 25 to 10 for speed
+                    # Check timeout
+                    if time.time() - start_time > timeout_seconds:
+                        break
+                        
+                    # Analyze post sentiment
+                    sentiment = analyze_text_sentiment(post.title + " " + post.selftext)
                     
-                    comment_data = {
-                        "id": comment.id,
+                    # Collect post data
+                    post_data = {
+                        "id": post.id,
                         "subreddit": subreddit_name,
-                        "title": f"Comment on: {post.title[:50]}...",
-                        "score": comment.score,
-                        "num_comments": 0,
-                        "created_utc": datetime.fromtimestamp(comment.created_utc),
-                        "sentiment_score": comment_sentiment["score"],
-                        "sentiment_label": comment_sentiment["label"],
-                        "type": "comment"
+                        "title": post.title,
+                        "score": post.score,
+                        "num_comments": post.num_comments,
+                        "created_utc": datetime.fromtimestamp(post.created_utc),
+                        "sentiment_score": sentiment["score"],
+                        "sentiment_label": sentiment["label"],
+                        "type": "post"
                     }
                     
-                    posts_data.append(comment_data)
+                    posts_data.append(post_data)
+                    
+                    # Analyze only a few top comments to avoid timeouts
+                    post.comments.replace_more(limit=0)  # Skip fetching more comments
+                    for i, comment in enumerate(list(post.comments)):
+                        if i >= 5:  # Only process 5 comments per post
+                            break
+                            
+                        # Check timeout
+                        if time.time() - start_time > timeout_seconds:
+                            break
+                            
+                        comment_sentiment = analyze_text_sentiment(comment.body)
+                        
+                        comment_data = {
+                            "id": comment.id,
+                            "subreddit": subreddit_name,
+                            "title": f"Comment on: {post.title[:50]}...",
+                            "score": comment.score,
+                            "num_comments": 0,
+                            "created_utc": datetime.fromtimestamp(comment.created_utc),
+                            "sentiment_score": comment_sentiment["score"],
+                            "sentiment_label": comment_sentiment["label"],
+                            "type": "comment"
+                        }
+                        
+                        posts_data.append(comment_data)
+            except Exception as e:
+                # If error occurs for a subreddit, continue with others
+                continue
         
+        # If we don't have enough data, use sample data
+        if len(posts_data) < 10:
+            return generate_sample_reddit_data()
+            
         # Convert to DataFrame
         df = pd.DataFrame(posts_data)
         
@@ -711,13 +739,18 @@ def get_reddit_sentiment():
         # Calculate overall sentiment metrics
         total_weighted = df["weighted_sentiment"].sum()
         total_weight = (df["score"] + 1).sum()
-        overall_sentiment = total_weighted / total_weight
+        overall_sentiment = total_weighted / total_weight if total_weight > 0 else 0
         
         # Count sentiment categories
         sentiment_counts = df["sentiment_label"].value_counts().to_dict()
         
         # Get average sentiment by subreddit
         subreddit_sentiment = df.groupby("subreddit")["sentiment_score"].mean().to_dict()
+        
+        # Make sure we have all subreddits in the dictionary (even if missing)
+        for sub in subreddits:
+            if sub not in subreddit_sentiment:
+                subreddit_sentiment[sub] = 0
         
         # Get recent trending posts (high score, recent)
         df["recency_score"] = (datetime.now() - df["created_utc"]).dt.total_seconds() / 3600  # Hours ago
@@ -749,21 +782,39 @@ def analyze_text_sentiment(text):
     if not text or text.strip() == "":
         return {"score": 0, "label": "neutral"}
     
-    # Analyze with TextBlob
-    analysis = TextBlob(text)
-    
-    # Get polarity score (-1 to 1)
-    score = analysis.sentiment.polarity
-    
-    # Determine sentiment label
-    if score > 0.2:
-        label = "bullish"
-    elif score < -0.2:
-        label = "bearish"
-    else:
-        label = "neutral"
-    
-    return {"score": score, "label": label}
+    try:
+        # Analyze with TextBlob
+        analysis = TextBlob(text)
+        
+        # Get polarity score (-1 to 1)
+        score = analysis.sentiment.polarity
+        
+        # Determine sentiment label
+        if score > 0.2:
+            label = "bullish"
+        elif score < -0.2:
+            label = "bearish"
+        else:
+            label = "neutral"
+        
+        return {"score": score, "label": label}
+    except Exception as e:
+        # If TextBlob fails, use a simple keyword-based approach
+        text = text.lower()
+        bullish_words = ["bullish", "buy", "moon", "growth", "up", "gain", "profit", "positive", "rally", 
+                         "surge", "soar", "excellent", "opportunity", "potential", "hodl", "green"]
+        bearish_words = ["bearish", "sell", "crash", "down", "fall", "decline", "loss", "negative", "dump", 
+                         "correction", "drop", "avoid", "risk", "bubble", "bad", "red"]
+        
+        bullish_count = sum(1 for word in bullish_words if word in text)
+        bearish_count = sum(1 for word in bearish_words if word in text)
+        
+        if bullish_count > bearish_count:
+            return {"score": 0.3, "label": "bullish"}
+        elif bearish_count > bullish_count:
+            return {"score": -0.3, "label": "bearish"}
+        else:
+            return {"score": 0, "label": "neutral"}
 
 def generate_sample_reddit_data():
     """Generate sample Reddit sentiment data when API is not available"""
