@@ -1,0 +1,10 @@
+[theme]
+primaryColor = "#F5B041"  # Bitcoin gold color
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F8F8F8"
+textColor = "#333333"
+font = "sans serif"
+
+[server]
+enableCORS = false
+enableXsrfProtection = false 
