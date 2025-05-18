@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 import time
 import requests
 import os
+import praw
+from textblob import TextBlob
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -632,8 +634,203 @@ def get_btc_mining_data():
     
     return mining_data
 
+# Reddit Sentiment Analysis Functions
+@st.cache_data(ttl=1800)  # Cache for 30 minutes
+def get_reddit_sentiment():
+    """Fetch and analyze Reddit posts for Bitcoin sentiment"""
+    try:
+        # Initialize Reddit API with environment variables
+        reddit_client_id = os.getenv("REDDIT_CLIENT_ID")
+        reddit_client_secret = os.getenv("REDDIT_CLIENT_SECRET")
+        reddit_user_agent = os.getenv("REDDIT_USER_AGENT", "Bitcoin_Sentiment_Index_Bot")
+        
+        if not reddit_client_id or not reddit_client_secret:
+            return generate_sample_reddit_data()
+        
+        # Initialize Reddit API
+        reddit = praw.Reddit(
+            client_id=reddit_client_id,
+            client_secret=reddit_client_secret,
+            user_agent=reddit_user_agent
+        )
+        
+        # Subreddits to analyze
+        subreddits = ["Bitcoin", "CryptoCurrency", "BitcoinMarkets", "btc"]
+        
+        # Fetch posts and comments
+        posts_data = []
+        
+        for subreddit_name in subreddits:
+            subreddit = reddit.subreddit(subreddit_name)
+            
+            # Get hot posts
+            for post in subreddit.hot(limit=25):
+                # Analyze post sentiment
+                sentiment = analyze_text_sentiment(post.title + " " + post.selftext)
+                
+                # Collect post data
+                post_data = {
+                    "id": post.id,
+                    "subreddit": subreddit_name,
+                    "title": post.title,
+                    "score": post.score,
+                    "num_comments": post.num_comments,
+                    "created_utc": datetime.fromtimestamp(post.created_utc),
+                    "sentiment_score": sentiment["score"],
+                    "sentiment_label": sentiment["label"],
+                    "type": "post"
+                }
+                
+                posts_data.append(post_data)
+                
+                # Analyze top comments
+                post.comments.replace_more(limit=0)  # Skip fetching more comments
+                for comment in list(post.comments)[:10]:  # Get top 10 comments
+                    comment_sentiment = analyze_text_sentiment(comment.body)
+                    
+                    comment_data = {
+                        "id": comment.id,
+                        "subreddit": subreddit_name,
+                        "title": f"Comment on: {post.title[:50]}...",
+                        "score": comment.score,
+                        "num_comments": 0,
+                        "created_utc": datetime.fromtimestamp(comment.created_utc),
+                        "sentiment_score": comment_sentiment["score"],
+                        "sentiment_label": comment_sentiment["label"],
+                        "type": "comment"
+                    }
+                    
+                    posts_data.append(comment_data)
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(posts_data)
+        
+        # Calculate weighted sentiment
+        df["weighted_sentiment"] = df["sentiment_score"] * (df["score"] + 1)  # Add 1 to avoid multiplying by zero
+        
+        # Calculate overall sentiment metrics
+        total_weighted = df["weighted_sentiment"].sum()
+        total_weight = (df["score"] + 1).sum()
+        overall_sentiment = total_weighted / total_weight
+        
+        # Count sentiment categories
+        sentiment_counts = df["sentiment_label"].value_counts().to_dict()
+        
+        # Get average sentiment by subreddit
+        subreddit_sentiment = df.groupby("subreddit")["sentiment_score"].mean().to_dict()
+        
+        # Get recent trending posts (high score, recent)
+        df["recency_score"] = (datetime.now() - df["created_utc"]).dt.total_seconds() / 3600  # Hours ago
+        df["trending_score"] = df["score"] / (df["recency_score"] + 1)  # Higher score for recent, high scoring posts
+        trending_posts = df.sort_values("trending_score", ascending=False).head(5)
+        
+        # Process time series for sentiment over time
+        df["date"] = df["created_utc"].dt.date
+        sentiment_by_date = df.groupby("date")["sentiment_score"].mean().reset_index()
+        sentiment_by_date["date"] = pd.to_datetime(sentiment_by_date["date"])
+        
+        # Return structured data
+        return {
+            "overall_sentiment": overall_sentiment,
+            "sentiment_counts": sentiment_counts,
+            "subreddit_sentiment": subreddit_sentiment,
+            "trending_posts": trending_posts,
+            "sentiment_over_time": sentiment_by_date,
+            "data_source": "reddit_api",
+            "post_count": len(df)
+        }
+    
+    except Exception as e:
+        # Return mock data if error occurs
+        return generate_sample_reddit_data()
+
+def analyze_text_sentiment(text):
+    """Analyze sentiment of text using TextBlob"""
+    if not text or text.strip() == "":
+        return {"score": 0, "label": "neutral"}
+    
+    # Analyze with TextBlob
+    analysis = TextBlob(text)
+    
+    # Get polarity score (-1 to 1)
+    score = analysis.sentiment.polarity
+    
+    # Determine sentiment label
+    if score > 0.2:
+        label = "bullish"
+    elif score < -0.2:
+        label = "bearish"
+    else:
+        label = "neutral"
+    
+    return {"score": score, "label": label}
+
+def generate_sample_reddit_data():
+    """Generate sample Reddit sentiment data when API is not available"""
+    # Create sample dates
+    dates = pd.date_range(end=datetime.now(), periods=30, freq='D')
+    
+    # Generate trending sentiment (somewhat correlated with market but with some randomness)
+    base_sentiment = np.linspace(-0.1, 0.4, len(dates))  # Slight uptrend
+    noise = np.random.normal(0, 0.2, len(dates))  # Random noise
+    sentiment_values = np.clip(base_sentiment + noise, -1, 1)  # Clip to valid range
+    
+    # Create sentiment over time DataFrame
+    sentiment_by_date = pd.DataFrame({
+        'date': dates,
+        'sentiment_score': sentiment_values
+    })
+    
+    # Create sample subreddit sentiment
+    subreddit_sentiment = {
+        "Bitcoin": 0.15,
+        "CryptoCurrency": 0.05,
+        "BitcoinMarkets": -0.12,
+        "btc": 0.22
+    }
+    
+    # Create sample sentiment counts
+    sentiment_counts = {
+        "bullish": 146,
+        "neutral": 218,
+        "bearish": 87
+    }
+    
+    # Generate sample trending posts
+    trending_posts = pd.DataFrame({
+        "id": [f"sample{i}" for i in range(5)],
+        "subreddit": np.random.choice(["Bitcoin", "CryptoCurrency", "BitcoinMarkets", "btc"], 5),
+        "title": [
+            "Bitcoin just broke the $100k resistance level!",
+            "Why I'm still bullish on Bitcoin despite market uncertainty",
+            "Technical Analysis: BTC might be forming a double bottom",
+            "Is institutional adoption slowing down? My thoughts on recent BTC trends",
+            "This halving cycle is unlike any other we've seen before"
+        ],
+        "score": np.random.randint(100, 5000, 5),
+        "num_comments": np.random.randint(10, 300, 5),
+        "created_utc": [datetime.now() - timedelta(hours=i*4) for i in range(5)],
+        "sentiment_score": [0.65, 0.45, 0.1, -0.3, 0.25],
+        "sentiment_label": ["bullish", "bullish", "neutral", "bearish", "bullish"],
+        "type": ["post", "post", "post", "post", "post"],
+        "trending_score": np.random.uniform(50, 500, 5)
+    })
+    
+    # Calculate overall sentiment (weighted average of sample data)
+    overall_sentiment = 0.08  # Slightly positive
+    
+    return {
+        "overall_sentiment": overall_sentiment,
+        "sentiment_counts": sentiment_counts,
+        "subreddit_sentiment": subreddit_sentiment,
+        "trending_posts": trending_posts,
+        "sentiment_over_time": sentiment_by_date,
+        "data_source": "sample_data",
+        "post_count": 451  # Sample size
+    }
+
 # Create tabs
-tab1, tab2, tab3 = st.tabs(["Overview", "Timeline", "On-Chain Data"])
+tab1, tab2, tab3, tab4 = st.tabs(["Overview", "Timeline", "On-Chain Data", "Reddit Sentiment"])
 
 # Calculate current index
 with st.spinner("Calculating market sentiment..."):
@@ -1485,6 +1682,277 @@ with tab3:
         
         Rising hashrate typically indicates miner confidence in Bitcoin's long-term value.
         """)
+
+with tab4:
+    st.subheader("Reddit Sentiment Analysis")
+    st.markdown("Reddit sentiment analysis provides insights into community sentiment towards Bitcoin")
+    
+    # Get sentiment data with loading indicator
+    with st.spinner("Loading sentiment data..."):
+        sentiment_data = get_reddit_sentiment()
+    
+    # Check if we're using sample data
+    if sentiment_data["data_source"] == "sample_data":
+        st.info("""
+        **ⓘ Currently displaying sample data**
+        
+        To show real Reddit sentiment:
+        1. Ensure your .env file contains valid Reddit API credentials:
+           - REDDIT_CLIENT_ID=your_client_id
+           - REDDIT_CLIENT_SECRET=your_client_secret
+           - REDDIT_USER_AGENT=your_user_agent
+        """)
+    
+    # Create metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        # Convert sentiment score to a 0-100 scale for consistency with other metrics
+        sentiment_score = (sentiment_data["overall_sentiment"] + 1) * 50
+        st.metric(
+            label="Community Sentiment", 
+            value=f"{sentiment_score:.0f}/100"
+        )
+    
+    with col2:
+        # Create a ratio of bullish:bearish
+        bullish = sentiment_data["sentiment_counts"].get("bullish", 0)
+        bearish = sentiment_data["sentiment_counts"].get("bearish", 0)
+        ratio = bullish / max(1, bearish)  # Avoid division by zero
+        
+        st.metric(
+            label="Bull/Bear Ratio", 
+            value=f"{ratio:.1f}"
+        )
+    
+    with col3:
+        st.metric(
+            label="Posts Analyzed", 
+            value=f"{sentiment_data['post_count']:,}"
+        )
+    
+    with col4:
+        # Calculate percentage of bullish content
+        total = sum(sentiment_data["sentiment_counts"].values())
+        bullish_pct = (bullish / total) * 100 if total > 0 else 0
+        
+        st.metric(
+            label="Bullish Content", 
+            value=f"{bullish_pct:.1f}%"
+        )
+    
+    # Create sentiment gauge chart
+    st.subheader("Community Sentiment Gauge")
+    
+    fig_sentiment = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=sentiment_score,
+        domain={'x': [0, 1], 'y': [0, 1]},
+        title={'text': "Reddit Sentiment", 'font': {'size': 24}},
+        gauge={
+            'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "gray"},
+            'bar': {'color': "darkblue"},
+            'bgcolor': "white",
+            'borderwidth': 2,
+            'bordercolor': "gray",
+            'steps': [
+                {'range': [0, 30], 'color': "rgba(255, 0, 0, 0.7)"},
+                {'range': [30, 45], 'color': "rgba(255, 165, 0, 0.7)"},
+                {'range': [45, 55], 'color': "rgba(169, 169, 169, 0.7)"},
+                {'range': [55, 70], 'color': "rgba(144, 238, 144, 0.7)"},
+                {'range': [70, 100], 'color': "rgba(0, 128, 0, 0.7)"}
+            ],
+            'threshold': {
+                'line': {'color': "red", 'width': 4},
+                'thickness': 0.75,
+                'value': sentiment_score
+            }
+        }
+    ))
+    
+    # Update layout
+    fig_sentiment.update_layout(
+        height=300,
+        margin=dict(l=20, r=20, t=50, b=50),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(size=16)
+    )
+    
+    st.plotly_chart(fig_sentiment, use_container_width=True)
+    
+    # Create tabs for more detailed sentiment analysis
+    sentiment_tab1, sentiment_tab2, sentiment_tab3 = st.tabs(["Trending Posts", "Sentiment by Subreddit", "Sentiment Over Time"])
+    
+    with sentiment_tab1:
+        st.subheader("Trending Posts")
+        trending_posts = sentiment_data["trending_posts"]
+        
+        for i, post in trending_posts.iterrows():
+            # Determine color based on sentiment
+            if post["sentiment_label"] == "bullish":
+                sentiment_color = "green"
+            elif post["sentiment_label"] == "bearish":
+                sentiment_color = "red"
+            else:
+                sentiment_color = "gray"
+                
+            # Calculate how long ago the post was made
+            time_diff = datetime.now() - post["created_utc"]
+            hours_ago = time_diff.total_seconds() / 3600
+            
+            if hours_ago < 24:
+                time_str = f"{int(hours_ago)} hours ago"
+            else:
+                days = int(hours_ago / 24)
+                time_str = f"{days} days ago"
+            
+            st.markdown(f"""
+            <div style="border-left: 4px solid {sentiment_color}; padding-left: 10px; margin-bottom: 20px;">
+                <h4>{post['title']}</h4>
+                <p>r/{post['subreddit']} • {post['score']} points • {post['num_comments']} comments • {time_str}</p>
+                <p><span style="background-color: {'rgba(0, 128, 0, 0.1)' if sentiment_color == 'green' else 'rgba(255, 0, 0, 0.1)' if sentiment_color == 'red' else 'rgba(128, 128, 128, 0.1)'};
+                         color: {sentiment_color}; padding: 2px 8px; border-radius: 10px;">
+                    {post['sentiment_label'].upper()}
+                </span></p>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    with sentiment_tab2:
+        st.subheader("Sentiment by Subreddit")
+        
+        # Create a bar chart for subreddit sentiment
+        subreddit_names = list(sentiment_data["subreddit_sentiment"].keys())
+        sentiment_values = list(sentiment_data["subreddit_sentiment"].values())
+        
+        fig_subreddits = go.Figure()
+        fig_subreddits.add_trace(go.Bar(
+            x=subreddit_names,
+            y=sentiment_values,
+            marker_color=['green' if v > 0.1 else 'red' if v < -0.1 else 'gray' for v in sentiment_values]
+        ))
+        
+        fig_subreddits.update_layout(
+            title="Sentiment by Subreddit",
+            xaxis_title="Subreddit",
+            yaxis_title="Sentiment Score (-1 to 1)",
+            height=400,
+            margin=dict(l=20, r=20, t=50, b=50),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)"
+        )
+        
+        # Add a zero line
+        fig_subreddits.add_shape(
+            type="line",
+            x0=-0.5,
+            x1=len(subreddit_names) - 0.5,
+            y0=0,
+            y1=0,
+            line=dict(color="black", width=1, dash="dash")
+        )
+        
+        st.plotly_chart(fig_subreddits, use_container_width=True)
+        
+        # Display subreddit descriptions
+        with st.expander("About these subreddits"):
+            st.markdown("""
+            - **r/Bitcoin**: The main Bitcoin subreddit, tends to be very bullish and focused on long-term holding
+            - **r/CryptoCurrency**: Covers all cryptocurrencies, often more balanced in sentiment
+            - **r/BitcoinMarkets**: Focused on trading Bitcoin, more technical and sometimes contrarian
+            - **r/btc**: Originally a fork of r/Bitcoin after moderation disputes, now more focused on Bitcoin Cash
+            """)
+    
+    with sentiment_tab3:
+        st.subheader("Sentiment Over Time")
+        
+        # Create line chart for sentiment over time
+        fig_sentiment_over_time = go.Figure()
+        fig_sentiment_over_time.add_trace(go.Scatter(
+            x=sentiment_data['sentiment_over_time']['date'],
+            y=sentiment_data['sentiment_over_time']['sentiment_score'],
+            mode='lines',
+            name='Sentiment Score',
+            line=dict(color='blue', width=2)
+        ))
+        
+        # Add a zero line
+        fig_sentiment_over_time.add_shape(
+            type="line",
+            x0=sentiment_data['sentiment_over_time']['date'].min(),
+            x1=sentiment_data['sentiment_over_time']['date'].max(),
+            y0=0,
+            y1=0,
+            line=dict(color="black", width=1, dash="dash")
+        )
+        
+        # Highlight areas based on sentiment
+        dates = sentiment_data['sentiment_over_time']['date']
+        scores = sentiment_data['sentiment_over_time']['sentiment_score']
+        
+        for i in range(len(dates) - 1):
+            if scores[i] > 0.1:
+                color = "rgba(0, 255, 0, 0.1)"  # Light green
+            elif scores[i] < -0.1:
+                color = "rgba(255, 0, 0, 0.1)"  # Light red
+            else:
+                continue  # Skip neutral sentiments
+                
+            fig_sentiment_over_time.add_shape(
+                type="rect",
+                x0=dates[i],
+                x1=dates[i+1],
+                y0=min(0, scores[i]),
+                y1=max(0, scores[i]),
+                fillcolor=color,
+                line=dict(width=0),
+                layer="below"
+            )
+        
+        fig_sentiment_over_time.update_layout(
+            title="Reddit Sentiment Trend",
+            xaxis_title="Date",
+            yaxis_title="Sentiment Score (-1 to 1)",
+            yaxis=dict(range=[-1, 1]),  # Fix y-axis range
+            height=400,
+            margin=dict(l=20, r=20, t=50, b=50),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)"
+        )
+        
+        st.plotly_chart(fig_sentiment_over_time, use_container_width=True)
+        
+        # Add sentiment distribution pie chart
+        st.subheader("Sentiment Distribution")
+        
+        # Get sentiment counts
+        labels = list(sentiment_data["sentiment_counts"].keys())
+        values = list(sentiment_data["sentiment_counts"].values())
+        
+        # Define colors for each sentiment
+        colors = {
+            "bullish": "rgba(0, 128, 0, 0.7)",
+            "neutral": "rgba(128, 128, 128, 0.7)",
+            "bearish": "rgba(255, 0, 0, 0.7)"
+        }
+        
+        # Create pie chart
+        fig_pie = go.Figure(data=[go.Pie(
+            labels=labels,
+            values=values,
+            hole=.3,
+            marker=dict(colors=[colors.get(label, "gray") for label in labels])
+        )])
+        
+        fig_pie.update_layout(
+            height=350,
+            margin=dict(l=20, r=20, t=30, b=0),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=0, xanchor="center", x=0.5)
+        )
+        
+        st.plotly_chart(fig_pie, use_container_width=True)
 
 # Methodology section
 st.markdown("---")
