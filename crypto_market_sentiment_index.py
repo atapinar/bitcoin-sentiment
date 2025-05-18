@@ -269,8 +269,146 @@ def calculate_market_index():
             'Volatility': 50.0
         }, {}
 
+@st.cache_data(ttl=86400)  # Cache for 24 hours
+def get_historical_data():
+    """Calculate actual historical market index values instead of simulated data"""
+    try:
+        # Get Bitcoin historical data for the past year
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365)
+        btc_data = yf.download("BTC-USD", start=start_date, end=end_date, progress=False)
+        
+        if btc_data.empty or len(btc_data) < 30:
+            # Fall back to simulation if data fetch fails
+            return generate_historical_index()
+        
+        # Create dataframe for results
+        dates = btc_data.index
+        historical_df = pd.DataFrame(index=dates)
+        historical_df['Date'] = dates
+        
+        # Calculate indicators for each historical date
+        historical_df['RSI'] = calculate_rsi(btc_data['Close'])
+        historical_df['SMA_50'] = btc_data['Close'].rolling(window=50, min_periods=1).mean()
+        historical_df['SMA_200'] = btc_data['Close'].rolling(window=200, min_periods=1).mean()
+        
+        # Calculate daily returns and volatility
+        historical_df['Daily_Return'] = btc_data['Close'].pct_change()
+        historical_df['Volatility'] = historical_df['Daily_Return'].rolling(window=20, min_periods=5).std() * np.sqrt(365) * 100
+        
+        # Calculate index values for each date
+        index_values = []
+        
+        for i in range(len(historical_df)):
+            if i < 30:  # Need some history for calculations
+                index_values.append(50)  # Neutral default for first few days
+                continue
+                
+            # Get data for this date
+            current_date = historical_df.index[i]
+            current_price = float(btc_data['Close'].iloc[i])
+            current_rsi = float(historical_df['RSI'].iloc[i]) if not pd.isna(historical_df['RSI'].iloc[i]) else 50.0
+            current_sma50 = float(historical_df['SMA_50'].iloc[i])
+            current_sma200 = float(historical_df['SMA_200'].iloc[i])
+            current_volatility = float(historical_df['Volatility'].iloc[i]) if not pd.isna(historical_df['Volatility'].iloc[i]) else 30.0
+            
+            # Calculate average volatility for comparison
+            lookback = min(i, 90)  # Look back up to 90 days
+            volatility_values = historical_df['Volatility'].iloc[i-lookback:i].dropna().values
+            avg_volatility = float(np.mean(volatility_values)) if len(volatility_values) > 0 else 30.0
+            
+            # Calculate returns over different timeframes
+            lookback_30 = min(i, 30)  # 30 days ago or start of data
+            lookback_90 = min(i, 90)  # 90 days ago or start of data
+            
+            past_price_30d = float(btc_data['Close'].iloc[i - lookback_30])
+            past_price_90d = float(btc_data['Close'].iloc[i - lookback_90])
+            
+            monthly_return = ((current_price / past_price_30d) - 1) * 100
+            quarterly_return = ((current_price / past_price_90d) - 1) * 100
+            
+            # Trend analysis
+            is_above_50sma = current_price > current_sma50
+            is_above_200sma = current_price > current_sma200
+            golden_cross = current_sma50 > current_sma200
+            
+            # Component scores
+            
+            # RSI score
+            if np.isnan(current_rsi):
+                rsi_score = 50.0
+            elif current_rsi > 70:
+                rsi_score = 100.0 - current_rsi
+            elif current_rsi < 30:
+                rsi_score = current_rsi
+            else:
+                rsi_score = 50.0
+            
+            # Trend score
+            if is_above_50sma and is_above_200sma and golden_cross:
+                trend_score = 80.0
+            elif is_above_50sma and is_above_200sma:
+                trend_score = 70.0
+            elif is_above_50sma:
+                trend_score = 60.0
+            elif not is_above_50sma and not is_above_200sma:
+                trend_score = 30.0
+            else:
+                trend_score = 40.0
+            
+            # Performance score
+            if monthly_return > 20 and quarterly_return > 30:
+                performance_score = 10.0
+            elif monthly_return > 10 and quarterly_return > 20:
+                performance_score = 30.0
+            elif monthly_return < -20 and quarterly_return < -30:
+                performance_score = 90.0
+            elif monthly_return < -10 and quarterly_return < -20:
+                performance_score = 70.0
+            else:
+                performance_score = 50.0
+            
+            # Volatility score
+            volatility_ratio = current_volatility / max(0.1, avg_volatility)
+            
+            if volatility_ratio > 1.5:
+                volatility_score = 30.0
+            elif volatility_ratio < 0.7:
+                volatility_score = 70.0
+            else:
+                volatility_score = 50.0
+            
+            # Combine component scores
+            component_scores = {
+                'RSI': rsi_score,
+                'Trend': trend_score,
+                'Performance': performance_score,
+                'Volatility': volatility_score
+            }
+            
+            weights = {
+                'RSI': 0.25,
+                'Trend': 0.35,
+                'Performance': 0.25,
+                'Volatility': 0.15
+            }
+            
+            # Calculate index value
+            index_value = sum(component_scores[k] * weights[k] for k in weights)
+            index_values.append(max(0.0, min(100.0, index_value)))
+        
+        # Add index values to dataframe
+        historical_df['Index'] = index_values
+        
+        return historical_df[['Date', 'Index']].dropna()
+    
+    except Exception as e:
+        # Fall back to simulated data if there's an error
+        st.warning(f"Error calculating historical index: {str(e)}. Using simulated data instead.")
+        return generate_historical_index()
+
 def generate_historical_index():
-    """Generate simulated historical index values"""
+    """Generate simulated historical index values - FOR BACKUP ONLY"""
     dates = pd.date_range(end=datetime.now(), periods=365, freq='D')
     
     # Create a baseline with some trend
