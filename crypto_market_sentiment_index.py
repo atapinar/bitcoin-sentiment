@@ -62,9 +62,13 @@ with st.sidebar.expander("Set Up Price Alerts"):
     st.text_input("Alert when price drops below $", "60000")
 
 # App title and description
-st.title("Bitcoin Signal Index")
-st.markdown("### What action should you consider in the market now?")
-st.markdown("[Learn more about this index](#how-it-works)")
+col1, col2 = st.columns([1, 5])
+with col1:
+    st.image("Bitcoin.svg.png", width=100)
+with col2:
+    st.title("Bitcoin Signal Index")
+    st.markdown("### What action should you consider in the market now?")
+    st.markdown("[Learn more about this index](#how-it-works)")
 
 # Simple RSI calculation function that avoids Series comparisons
 def calculate_rsi(prices, window=14):
